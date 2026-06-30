@@ -1033,3 +1033,99 @@ graph TD
   - Browser caching eliminates repeated backend calls for identical data.
 - **Tradeoffs**:
   - Data projection means the client must make an additional API request (e.g., `GET /notifications/:id`) to retrieve full metadata when clicking on a notification card.
+
+---
+
+## Stage 5 - Bulk Notification Architecture (Queue Processing)
+
+### 1. Shortcomings of the Current Implementation
+The current implementation uses a synchronous `for` loop to process 50,000 notifications inside the API handler:
+```javascript
+function notify_all(student_ids, message){
+    for(student of student_ids){
+        send_email(student)
+        save_to_db(student)
+        push_to_app(student)
+    }
+}
+```
+**Why this approach fails in production:**
+- **Sequential Execution (Slow)**: Iterating sequentially over 50,000 users and waiting for network-bound operations (like `send_email`) will block the Node.js event loop or cause the HTTP request to hit a gateway timeout (e.g., 504 Gateway Timeout).
+- **Partial Failures**: If the script crashes or an unhandled exception occurs (e.g., at student 200), the loop terminates abruptly. The remaining 49,800 students receive nothing, and the system is left in an inconsistent state.
+- **No Retry Mechanism**: External services (like email providers) experience transient network glitches. If `send_email` fails, the user misses the notification permanently.
+- **Lack of Idempotency**: If the HR admin clicks "Notify All" again to fix the partial failure, the first 199 students will receive duplicate emails.
+
+### 2. The Relationship Between Database and Email (Eventual Consistency)
+**Should saving to the DB and sending the email happen together?**
+**No.** They must be decoupled. 
+
+Database operations are internal, fast, and highly reliable. External APIs (like email services) are external, slow, and prone to rate limits or outages. 
+- **Rule of Thumb**: Always save the *intent* to notify in the database first. 
+- **Eventual Consistency**: If the database save succeeds, we can reliably attempt to send the email in the background. Even if the email API goes down for an hour, the queue will retry and eventually deliver the message, ensuring data integrity.
+
+### 3. Proposed Queue-Based Architecture (BullMQ + Redis)
+To make this reliable and fast, we introduce a **Message Queue** using **BullMQ** (backed by **Redis**) and independent **Worker Processes**.
+
+- **Background Jobs**: The API controller simply loops through the 50,000 students, performs a bulk insert into MongoDB, and pushes 50,000 lightweight jobs to a Redis queue. This takes milliseconds, allowing the HTTP response to return to the HR admin immediately.
+- **Parallel Processing (Workers)**: Multiple background worker processes consume jobs from the queue concurrently, sending emails and pushes in parallel without blocking the main API server.
+- **Failure Recovery & Retries**: BullMQ automatically retries failed jobs using an exponential backoff strategy (e.g., retry after 10s, then 30s, then 2m).
+- **Dead Letter Queue (DLQ)**: If a job fails permanently after the maximum number of retries (e.g., invalid email address), BullMQ moves it to a "failed" state (essentially a DLQ). Developers can manually inspect and requeue these later without clogging the main pipeline.
+
+### 4. Revised Pseudocode
+
+#### API Controller (Producer)
+```javascript
+import { Queue } from 'bullmq';
+
+// Connect to Redis-backed BullMQ
+const notificationQueue = new Queue('notificationQueue');
+
+async function notify_all_optimized(student_ids, message) {
+    // 1. Save all notifications to MongoDB in one efficient Bulk operation
+    // Default status: 'pending'
+    await bulk_save_to_db(student_ids, message);
+
+    // 2. Add jobs to BullMQ asynchronously
+    const jobs = student_ids.map(student_id => ({
+        name: 'send_notification',
+        data: { student_id, message }
+    }));
+    
+    await notificationQueue.addBulk(jobs);
+
+    // 3. Return success to HR admin immediately
+    return { status: "Processing started", count: student_ids.length };
+}
+```
+
+#### Background Worker (Consumer)
+```javascript
+import { Worker } from 'bullmq';
+
+// Worker runs in a separate Node.js process
+const worker = new Worker('notificationQueue', async job => {
+    const { student_id, message } = job.data;
+    
+    // 1. Idempotency Check (Ensure we haven't already processed this)
+    const notification = await get_notification_from_db(student_id, message.id);
+    if (notification.status === 'sent') return;
+
+    // 2. Perform external network calls in parallel
+    try {
+        await Promise.all([
+            send_email(student_id, message),
+            push_to_app(student_id, message)
+        ]);
+        
+        // 3. Mark as successfully completed in MongoDB
+        await update_db_status(student_id, 'sent');
+        
+    } catch (error) {
+        // If it fails, BullMQ will automatically catch this error and retry the job
+        throw new Error("Failed to send notification. Retrying...");
+    }
+}, { 
+    concurrency: 50, // Process 50 emails concurrently per worker instance
+    connection: redisConnection 
+});
+```
