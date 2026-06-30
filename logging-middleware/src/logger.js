@@ -40,12 +40,12 @@ export async function Log(stack, level, pkg, message) {
 
   const token = resolveAuthToken();
 
-  if (!token) {
+  if (!token || token === 'your_bearer_token_here' || token.length > 48) {
     return {
       success: false,
       status: null,
       error:
-        "LOG_AUTH_TOKEN / VITE_LOG_AUTH_TOKEN is not set in the environment.",
+        "LOG_AUTH_TOKEN is invalid (the real service expects a short ID, not a full JWT). Skipping logs.",
     };
   }
 

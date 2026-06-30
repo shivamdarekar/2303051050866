@@ -83,4 +83,7 @@ export const VALID_STACKS = Object.freeze(Object.values(Stack));
 export const VALID_LEVELS = Object.freeze(Object.values(Level));
 
 /** The remote logging endpoint — never hardcoded in callers. */
-export const LOG_ENDPOINT = "http://4.224.186.213/evaluation-service/logs";
+const isBrowser = typeof window !== 'undefined';
+export const LOG_ENDPOINT = isBrowser 
+  ? "/evaluation-service/logs" 
+  : "http://4.224.186.213/evaluation-service/logs";

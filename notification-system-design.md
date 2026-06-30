@@ -1129,3 +1129,47 @@ const worker = new Worker('notificationQueue', async job => {
     connection: redisConnection 
 });
 ```
+
+---
+
+## Stage 6 - Priority Inbox Algorithm & Architecture
+
+### 1. Priority Sorting Algorithm
+The Priority Inbox requires displaying the top $N$ notifications sorted by a strict hierarchy of types and a timestamp tie-breaker.
+
+**Priority Weights**:
+- Placement (Weight: 3)
+- Result (Weight: 2)
+- Event (Weight: 1)
+
+**Algorithm Breakdown (Static List)**:
+For a fetched array of $M$ notifications from the API:
+1. We assign a numeric weight to each notification based on its `Type`.
+2. We sort the array using a custom comparator:
+   - First, compare the assigned weights in descending order.
+   - If weights are equal, parse the `Timestamp` into a unix epoch and compare them in descending order (newest first).
+3. We slice the array from index `0` to `N` to get the Top N items.
+
+**Time Complexity**: 
+- Sorting takes $O(M \log M)$ where $M$ is the number of fetched notifications.
+- Slicing takes $O(N)$ where $N$ is the limit (10, 15, or 20).
+- Overall Time Complexity: **$O(M \log M)$**
+
+### 2. Extra Question: Efficiently Maintaining the Top 10
+**Problem**: New notifications arrive continuously via Socket.IO. Sorting the entire list every time a single new notification arrives is highly inefficient ($O(M \log M)$).
+
+**Solution**: **Min Heap (Priority Queue)**
+To efficiently maintain exactly the Top 10 notifications as a stream of new data arrives, we use a Min Heap of size 10.
+
+1. **Initialization**: We insert the first 10 highest-priority notifications into the Min Heap. 
+2. **The Root Node**: The root of the Min Heap will always contain the *lowest* priority notification out of the top 10 currently saved.
+3. **Stream Processing**: 
+   - When a new notification arrives, we compare it to the root of the Min Heap.
+   - If the new notification's priority is **lower** than the root, we discard it.
+   - If the new notification's priority is **higher** than the root, we `pop()` the root out and `push()` the new notification into the heap.
+
+**Why this is efficient (Time Complexity)**:
+- Comparing with the root takes $O(1)$.
+- Pushing/Popping from a heap of size $K$ takes $O(\log K)$. 
+- Since $K = 10$ (a tiny constant), the time complexity of processing a new notification is $O(\log 10)$, which simplifies to **$O(1)$ constant time**.
+- This completely eliminates the need to re-sort the entire massive array, making it extremely scalable for real-time frontend applications.

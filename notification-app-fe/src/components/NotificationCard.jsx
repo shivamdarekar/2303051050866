@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React from 'react';
 import {
   Card,
   CardContent,
@@ -13,8 +13,7 @@ import {
   CheckCircle as ReadIcon,
   Schedule as ScheduleIcon
 } from '@mui/icons-material';
-import { Log, Level, FrontendPackage } from 'logging-middleware';
-import { markNotificationAsRead } from '../api/notifications';
+import { useReadState } from '../hooks/useReadState';
 
 const typeColors = {
   'Placement': 'primary',
@@ -23,38 +22,26 @@ const typeColors = {
   'General': 'default'
 };
 
-export function NotificationCard({ notification, onUpdate }) {
-  const [isUpdating, setIsUpdating] = useState(false);
+export function NotificationCard({ notification }) {
+  const { markAsRead, isRead } = useReadState();
+
+  // Map from Evaluation API payload (Capitalized fields) or local backend (lowercase)
+  const id = notification.ID || notification.id;
+  const type = notification.Type || notification.type;
+  const title = notification.Title || notification.title;
+  const message = notification.Message || notification.message;
+  const timestamp = notification.Timestamp || notification.timestamp;
+  
+  const read = isRead(id);
 
   const handleMarkAsRead = async () => {
-    if (notification.read || isUpdating) return;
-
-    try {
-      setIsUpdating(true);
-      
-      await Log('frontend', Level.INFO, FrontendPackage.COMPONENT, 
-        `NotificationCard: Marking notification ${notification.id} as read`);
-
-      await markNotificationAsRead(notification.id);
-      
-      // Update parent component
-      if (onUpdate) {
-        onUpdate(notification.id, { ...notification, read: true });
-      }
-
-      await Log('frontend', Level.INFO, FrontendPackage.COMPONENT, 
-        `NotificationCard: Successfully marked notification ${notification.id} as read`);
-
-    } catch (error) {
-      await Log('frontend', Level.ERROR, FrontendPackage.COMPONENT, 
-        `NotificationCard: Failed to mark notification as read - ${error.message}`);
-    } finally {
-      setIsUpdating(false);
-    }
+    if (read) return;
+    await markAsRead(id);
   };
 
-  const formatTimestamp = (timestamp) => {
-    const date = new Date(timestamp);
+  const formatTimestamp = (ts) => {
+    if (!ts) return '';
+    const date = new Date(ts);
     const now = new Date();
     const diffInHours = Math.floor((now - date) / (1000 * 60 * 60));
 
@@ -67,9 +54,9 @@ export function NotificationCard({ notification, onUpdate }) {
   return (
     <Card 
       sx={{ 
-        backgroundColor: notification.read ? 'background.paper' : 'action.hover',
-        border: notification.read ? '1px solid' : '2px solid',
-        borderColor: notification.read ? 'divider' : 'primary.main',
+        backgroundColor: read ? 'background.paper' : 'action.hover',
+        border: read ? '1px solid' : '2px solid',
+        borderColor: read ? 'divider' : 'primary.main',
         '&:hover': {
           boxShadow: 2
         }
@@ -80,10 +67,11 @@ export function NotificationCard({ notification, onUpdate }) {
           <IconButton
             size="small"
             onClick={handleMarkAsRead}
-            disabled={notification.read || isUpdating}
+            disabled={read}
             sx={{ mt: -0.5 }}
+            aria-label="Mark as read"
           >
-            {notification.read ? (
+            {read ? (
               <ReadIcon color="success" fontSize="small" />
             ) : (
               <UnreadIcon color="primary" fontSize="small" />
@@ -93,34 +81,35 @@ export function NotificationCard({ notification, onUpdate }) {
           <Box flex={1}>
             <Stack direction="row" alignItems="center" spacing={1} mb={1}>
               <Chip 
-                label={notification.type}
-                color={typeColors[notification.type] || 'default'}
+                label={type}
+                color={typeColors[type] || 'default'}
                 size="small"
               />
-              <Box display="flex" alignItems="center" gap={0.5}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
                 <ScheduleIcon fontSize="small" sx={{ color: 'text.secondary' }} />
                 <Typography variant="caption" color="text.secondary">
-                  {formatTimestamp(notification.timestamp)}
+                  {formatTimestamp(timestamp)}
                 </Typography>
               </Box>
             </Stack>
             
             <Typography 
               variant="subtitle1" 
-              fontWeight={notification.read ? 'normal' : 'bold'}
+              fontWeight={read ? 'normal' : 'bold'}
               gutterBottom
             >
-              {notification.title}
+              {/* If the server provides a title, use it. Otherwise fallback to Type Update */}
+              {title || `${type} Update`}
             </Typography>
             
             <Typography 
               variant="body2" 
               color="text.secondary"
               sx={{ 
-                opacity: notification.read ? 0.8 : 1 
+                opacity: read ? 0.8 : 1 
               }}
             >
-              {notification.message}
+              {message}
             </Typography>
           </Box>
         </Stack>
